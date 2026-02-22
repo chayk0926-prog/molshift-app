@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+.env
+.venv
+venv/
+ENV/
+
+# Data & Results (large files)
+results/*.csv
+results/*.pkl
+results/*.joblib
+data/raw/
+*.sdf
+*.pdbqt
+*.pdb
+
+# Models (too large for GitHub free tier)
+models/*.pkl
+models/*.joblib
+*.pt
+*.pth
+
+# Logs & misc
+*.log
+.DS_Store
+Thumbs.db
+
+# Docking outputs
+docking_outputs/
+*.dlg
+
+# Benchmarking raw data
+Benchmarking validation/graphB3-main/__pycache__/
+Benchmarking validation/DeePred-BBB-main/__pycache__/
+
+# Jupyter
+.ipynb_checkpoints/
