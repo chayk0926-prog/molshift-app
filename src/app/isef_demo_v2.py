@@ -8,7 +8,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, Lipinski, AllChem
-from rdkit.Chem.Draw import rdMolDraw2D
+from rdkit.Chem import Draw
 import base64
 from io import BytesIO
 
@@ -59,14 +59,12 @@ st.markdown("""
 # ==========================================
 
 def mol_to_image_b64(mol, highlight_atoms=None, size=(420, 260)):
-    d = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
-    d.drawOptions().clearBackground = False
-    if highlight_atoms:
-        rdMolDraw2D.PrepareAndDrawMolecule(d, mol, highlightAtoms=list(set(highlight_atoms)))
-    else:
-        rdMolDraw2D.PrepareAndDrawMolecule(d, mol)
-    d.FinishDrawing()
-    return base64.b64encode(d.GetDrawingText()).decode()
+    """PIL-based renderer — works on Streamlit Cloud (no Cairo needed)."""
+    hl = list(set(highlight_atoms)) if highlight_atoms else []
+    img = Draw.MolToImage(mol, size=size, highlightAtoms=hl)
+    buf = BytesIO()
+    img.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 def calculate_features(smiles):
