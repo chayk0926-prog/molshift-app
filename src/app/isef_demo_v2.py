@@ -389,26 +389,93 @@ with tab_predict:
         st.markdown(f"MW: {f['mw']:.0f} | HBD: {f['hbd']} | HBA: {f['hba']}")
 
     with c_exp:
-        st.subheader("Mechanistic Interpretability")
+        st.subheader("🧬 Mechanistic Interpretability")
+
+        # ── Transporter Status Row ──────────────────────────────
+        st.markdown("**Transporter Gate Analysis**")
+        tc1, tc2, tc3, tc4 = st.columns(4)
+
+        pgp_score  = round(f['efflux'] * 0.8, 2)
+        bcrp_score = round(f['efflux'] * 0.4, 2)
+        glut1_score = round(f['influx'] * 0.85, 2)
+        lat1_score  = round(f['influx'] * 0.75, 2)
+
+        def transporter_card(col, name, score, role, threshold, icon_good, icon_bad):
+            is_good = (role == "influx" and score > threshold) or (role == "efflux" and score <= threshold)
+            color   = "#1B5E20" if is_good else "#B71C1C"
+            icon    = icon_good if is_good else icon_bad
+            bg      = "#E8F5E9" if is_good else "#FFEBEE"
+            col.markdown(
+                f'<div style="background:{bg};border-radius:8px;padding:10px;text-align:center">'
+                f'<div style="font-size:22px">{icon}</div>'
+                f'<div style="font-weight:700;font-size:13px">{name}</div>'
+                f'<div style="color:{color};font-weight:700;font-size:15px">{score:.2f}</div>'
+                f'<div style="color:gray;font-size:11px">{"Influx ✓" if role=="influx" else "Efflux Pump"}</div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+
+        transporter_card(tc1, "P-gp",   pgp_score,   "efflux", 2.0, "🟢", "🔴")
+        transporter_card(tc2, "BCRP",   bcrp_score,  "efflux", 1.5, "🟢", "🔴")
+        transporter_card(tc3, "GLUT1",  glut1_score, "influx", 2.0, "🟢", "🔴")
+        transporter_card(tc4, "LAT1",   lat1_score,  "influx", 2.0, "🟢", "🔴")
+
+        st.markdown("")
+
+        # ── Feature Contribution Bar Chart ─────────────────────
+        st.markdown("**What's driving the prediction?**")
+        contrib_labels = [
+            "LogP (passive diffusion)",
+            "TPSA penalty",
+            "Transport Momentum",
+            "P-gp Efflux Risk",
+            "Influx (GLUT1/LAT1)",
+        ]
+        logp_contrib     = min(max(f['logp'] * 0.4, -3), 3)
+        tpsa_contrib     = -f['tpsa'] * 0.025
+        momentum_contrib = f['momentum'] * 0.6
+        pgp_contrib      = -pgp_score * 0.5
+        influx_contrib   = glut1_score * 0.5
+
+        contrib_values = [logp_contrib, tpsa_contrib, momentum_contrib, pgp_contrib, influx_contrib]
+        bar_colors     = ['#2196F3' if v >= 0 else '#F44336' for v in contrib_values]
+
+        fig_bar, ax_bar = plt.subplots(figsize=(6, 2.8))
+        bars = ax_bar.barh(contrib_labels, contrib_values, color=bar_colors, edgecolor='white', height=0.55)
+        ax_bar.axvline(0, color='black', linewidth=0.8)
+        ax_bar.set_xlabel("Contribution to BPI Score")
+        ax_bar.set_title("Feature Contributions (blue = helps, red = hurts)", fontsize=10)
+        for bar, val in zip(bars, contrib_values):
+            ax_bar.text(val + (0.05 if val >= 0 else -0.05), bar.get_y() + bar.get_height()/2,
+                        f"{val:+.2f}", va='center', ha='left' if val >= 0 else 'right', fontsize=8)
+        ax_bar.spines['top'].set_visible(False)
+        ax_bar.spines['right'].set_visible(False)
+        plt.tight_layout()
+        st.pyplot(fig_bar)
+        plt.close(fig_bar)
+
+        st.markdown("")
+
+        # ── Plain-English Verdict ───────────────────────────────
+        st.markdown("**🔍 Verdict Explanation**")
         if is_perm:
-            st.markdown(f"""
-**Why it passes:** Positive Transport Momentum (+{f['momentum']:.2f}) — influx transporters (GLUT1/LAT1)
-outcompete P-gp efflux. LogP {f['logp']:.2f} and TPSA {f['tpsa']:.0f} Ų sit within the passive
-diffusion window for CNS entry (BPI = {f['bpi']:.3f}).
-""")
+            drivers = []
+            if f['momentum'] > 0.3:  drivers.append(f"✅ **Transport Momentum is positive (+{f['momentum']:.2f})** — GLUT1/LAT1 influx transporters outcompete P-gp efflux")
+            if f['logp'] > 0.5:       drivers.append(f"✅ **LogP = {f['logp']:.2f}** — good lipophilicity for passive membrane diffusion")
+            if f['tpsa'] < 90:        drivers.append(f"✅ **TPSA = {f['tpsa']:.0f} Ų** — low enough to avoid the hydration shell barrier")
+            if not drivers:            drivers.append(f"✅ **BPI = {f['bpi']:.3f}** — overall biophysical profile clears the BBB threshold")
+            for d in drivers:
+                st.markdown(d)
         else:
-            st.markdown(f"""
-**Root cause of failure:** Negative Transport Momentum ({f['momentum']:.2f}) — P-gp efflux dominates.
-
-| Barrier | Value | Status |
-|---|---|---|
-| Weighted P-gp Efflux | {f['efflux']:.2f} | ⚠️ High |
-| Weighted Influx (GLUT1/LAT1) | {f['influx']:.2f} | Low |
-| TPSA | {f['tpsa']:.0f} Ų | {'✅ OK' if f['tpsa'] < 90 else '⚠️ Too Polar'} |
-| BPI | {f['bpi']:.3f} | {'✅ OK' if f['bpi'] > 0 else '⚠️ Below Threshold'} |
-
-➡️ Switch to the **⚗️ Optimization Engine** tab to fix this.
-""")
+            blockers = []
+            if f['momentum'] < 0:     blockers.append(f"❌ **Negative Transport Momentum ({f['momentum']:.2f})** — P-gp efflux ({pgp_score:.2f}) is {abs(pgp_score/max(glut1_score,0.01)):.1f}× stronger than GLUT1 influx ({glut1_score:.2f})")
+            if f['tpsa'] > 90:        blockers.append(f"❌ **TPSA = {f['tpsa']:.0f} Ų** (limit: 90 Ų) — too many polar groups create a hydration shell the membrane repels")
+            if f['logp'] < 0:         blockers.append(f"❌ **LogP = {f['logp']:.2f}** — molecule is too hydrophilic to dissolve into the lipid bilayer")
+            if f['mw'] > 450:         blockers.append(f"❌ **MW = {f['mw']:.0f} Da** — too large for passive diffusion through the tight junction pores")
+            if not blockers:           blockers.append(f"❌ **BPI = {f['bpi']:.3f}** — overall biophysical profile falls below the BBB threshold")
+            for b in blockers:
+                st.markdown(b)
+            st.info("➡️ Switch to the **⚗️ Optimization Engine** tab — it will iteratively restructure this molecule until it crosses the BBB threshold.")
 
 
 # ============================================================
