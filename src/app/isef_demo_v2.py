@@ -152,11 +152,12 @@ def passes_lipinski(mol):
     return True, "✅ Pass"
 
 
-def run_optimizer(source_smiles, n_variants=8):
+def run_optimizer(source_smiles, n_variants=8, seen_global=None):
     src_f, src_mol = calculate_features(source_smiles)
     if not src_mol:
         return []
-    variants, seen = [], {source_smiles}
+    seen = seen_global if seen_global is not None else {source_smiles}
+    variants = []
 
     for tname, rules in TRANSFORMATIONS.items():
         for pattern, replacement in rules:
@@ -177,10 +178,10 @@ def run_optimizer(source_smiles, n_variants=8):
                                     dl = f_new['logp']     - src_f['logp']
                                     dp = f_new['prob']     - src_f['prob']
                                     reasons = []
-                                    if dm > 0.05:  reasons.append(f"↑ Momentum (+{dm:.2f})")
-                                    if dl > 0.2:   reasons.append(f"↑ LogP (+{dl:.1f})")
-                                    if dl < -0.2:  reasons.append(f"↓ LogP ({dl:.1f})")
-                                    if db > 0.1:   reasons.append(f"↑ BPI (+{db:.2f})")
+                                    if dm > 0.05:  reasons.append(f"\u2191 Momentum (+{dm:.2f})")
+                                    if dl > 0.2:   reasons.append(f"\u2191 LogP (+{dl:.1f})")
+                                    if dl < -0.2:  reasons.append(f"\u2193 LogP ({dl:.1f})")
+                                    if db > 0.1:   reasons.append(f"\u2191 BPI (+{db:.2f})")
                                     if not reasons: reasons = ["structural compactness optimized"]
                                     variants.append({
                                         'smiles': smi, 'mol': mol_new, 'type': tname,
@@ -195,6 +196,50 @@ def run_optimizer(source_smiles, n_variants=8):
 
     variants.sort(key=lambda x: x['prob'], reverse=True)
     return variants[:n_variants]
+
+
+def run_closed_loop_optimizer(source_smiles, max_cycles=6):
+    """
+    Iteratively optimize molecule cycle-by-cycle.
+    Each cycle: generate variants from current best, pick the top one.
+    Stop when BBB+ (prob > 0.5) is achieved OR max_cycles is reached.
+    Returns: list of steps (the full optimization path).
+    """
+    path = []
+    current_smiles = source_smiles
+    seen_all = {source_smiles}
+
+    for cycle in range(max_cycles):
+        variants = run_optimizer(current_smiles, n_variants=12, seen_global=seen_all)
+        if not variants:
+            break
+
+        # Pick best variant
+        best = variants[0]
+        seen_all.add(best['smiles'])
+
+        src_f, _ = calculate_features(current_smiles)
+        path.append({
+            'cycle':       cycle + 1,
+            'smiles':      best['smiles'],
+            'mol':         best['mol'],
+            'prob':        best['prob'],
+            'delta_prob':  best['prob'] - (src_f['prob'] if src_f else 0),
+            'bpi':         best['bpi'],
+            'momentum':    best['momentum'],
+            'logp':        best['logp'],
+            'mw':          best['mw'],
+            'type':        best['type'],
+            'reasons':     best['reasons'],
+            'success':     best['prob'] > 0.5,
+        })
+
+        if best['prob'] > 0.5:
+            break  # BBB+ achieved!
+
+        current_smiles = best['smiles']  # next cycle starts here
+
+    return path
 
 
 # ==========================================
@@ -358,68 +403,99 @@ diffusion window for CNS entry (BPI = {f['bpi']:.3f}).
 with tab_optimize:
     st.subheader("⚗️ V30 Closed-Loop Optimization Engine")
     st.markdown(f"""
-> Applying **SMARTS chemical transformation rules** guided by the Transport Momentum model.
-> Candidates pass **Lipinski's Rule of Five** filter for drug-likeness.
+> Each **cycle** takes the best transformed molecule from the previous round and uses it as
+> the new starting point — iterating until **BBB+ is achieved** or 6 cycles are exhausted.
 
-**Source:** `{src}`  &nbsp;|&nbsp; **BBB Prob:** {f['prob']*100:.1f}%  &nbsp;|&nbsp;
+**Source:** `{src}`  &nbsp;|&nbsp; **Starting BBB Prob:** {f['prob']*100:.1f}%  &nbsp;|&nbsp;
 **BPI:** {f['bpi']:.3f}  &nbsp;|&nbsp; **Momentum:** {f['momentum']:.2f}
 """)
 
-    if st.button("🚀 RUN OPTIMIZER", use_container_width=True):
-        with st.spinner("Generating optimized variants..."):
-            results = run_optimizer(src, n_variants=8)
-            st.session_state.opt_results = results
+    if st.button("🚀 RUN CLOSED-LOOP OPTIMIZER", use_container_width=True):
+        progress = st.progress(0, text="Starting optimization...")
+        with st.spinner("Running closed-loop optimization cycles..."):
+            path = run_closed_loop_optimizer(src, max_cycles=6)
+            st.session_state.opt_results = path
             st.session_state.opt_ran = True
+        progress.empty()
 
-    # Show results even after subsequent reruns (they're in session state)
     if st.session_state.opt_ran:
-        variants = st.session_state.opt_results
+        path = st.session_state.opt_results
         st.markdown("---")
 
-        if not variants:
-            st.warning("No valid drug-like variants found. Try a different source molecule.")
+        if not path:
+            st.warning("No valid drug-like variants found. The molecule may already be at an optimum or transformations don't apply. Try a different structure.")
         else:
-            st.success(f"✅ Found **{len(variants)}** optimized candidates — ranked by BBB Probability")
+            final = path[-1]
+            achieved = final['success']
 
-            for i, v in enumerate(variants):
-                col_img, col_info = st.columns([1, 2.5])
-                with col_img:
-                    img_b64 = mol_to_image_b64(v['mol'], size=(320, 200))
-                    st.markdown(f'<img src="data:image/png;base64,{img_b64}" width="100%">', unsafe_allow_html=True)
+            if achieved:
+                st.success(f"🎉 **BBB+ Achieved in {len(path)} cycle(s)!** Final probability: **{final['prob']*100:.1f}%** (started at {f['prob']*100:.1f}%)")
+            else:
+                st.warning(f"⚠️ Max cycles reached. Best achieved: **{final['prob']*100:.1f}%** (started at {f['prob']*100:.1f}%) — molecule approaching BBB+.")
 
-                with col_info:
-                    dp_sign = "+" if v['delta_prob'] >= 0 else ""
-                    prob_color = "#1B5E20" if v['prob'] > 0.5 else "#B71C1C"
-                    st.markdown(f"""
-**#{i+1} — {v['type']}** &nbsp;
-<span style="color:{prob_color}; font-size:18px; font-weight:700">BBB: {v['prob']*100:.1f}%</span>
-<span style="color:gray"> ({dp_sign}{v['delta_prob']*100:.1f}% vs source)</span>
-""", unsafe_allow_html=True)
-                    c_m1, c_m2, c_m3, c_m4 = st.columns(4)
-                    c_m1.metric("BPI",      f"{v['bpi']:.3f}",  delta=f"{v['delta_bpi']:+.3f}")
-                    c_m2.metric("Momentum", f"{v['momentum']:.2f}")
-                    c_m3.metric("LogP",     f"{v['logp']:.2f}")
-                    c_m4.metric("MW",       f"{v['mw']:.0f} Da")
-                    st.markdown(f"**Why:** {', '.join(v['reasons'])}.")
-                    st.code(v['smiles'], language=None)
+            st.markdown("---")
 
-                st.markdown("---")
+            # --- JOURNEY DISPLAY ---
+            # Source row
+            st.markdown("### Optimization Journey")
 
-            # Summary bar chart
-            st.subheader("📊 Candidate Comparison")
-            labels = [f"#{i+1}" for i in range(len(variants))]
-            probs  = [v['prob']*100 for v in variants]
-            colors = ['#1B5E20' if p > 50 else '#B71C1C' for p in probs]
+            # Header: source
+            with st.container():
+                c_img, c_info = st.columns([1, 2.5])
+                with c_img:
+                    src_img = mol_to_image_b64(mol, size=(300, 190))
+                    st.markdown(f'<img src="data:image/png;base64,{src_img}" width="100%">', unsafe_allow_html=True)
+                with c_info:
+                    st.markdown(f"**🔴 Source (Cycle 0)** — BBB Prob: **{f['prob']*100:.1f}%**")
+                    st.markdown(f"BPI: `{f['bpi']:.3f}` | Momentum: `{f['momentum']:.2f}` | LogP: `{f['logp']:.2f}` | MW: `{f['mw']:.0f} Da`")
+                    st.code(src, language=None)
 
-            fig2, ax2 = plt.subplots(figsize=(9, 3))
-            ax2.bar(labels, probs, color=colors, alpha=0.85, edgecolor='white')
-            ax2.axhline(50, color='#FF6B35', linestyle='--', lw=1.5, label='BBB Threshold')
-            ax2.axhline(f['prob']*100, color='#003366', linestyle=':', lw=1.5, label=f'Source ({f["prob"]*100:.1f}%)')
-            ax2.set_ylabel("BBB Probability (%)")
-            ax2.set_title("Optimized Variant BBB Probabilities", fontsize=12, fontweight='bold')
-            ax2.legend(); ax2.set_ylim(0, 100)
-            ax2.spines['top'].set_visible(False); ax2.spines['right'].set_visible(False)
-            st.pyplot(fig2)
+            for step in path:
+                st.markdown(f"<div style='text-align:center; color:#888; font-size:22px'>↓ {step['type']}</div>", unsafe_allow_html=True)
+                with st.container():
+                    c_img, c_info = st.columns([1, 2.5])
+                    with c_img:
+                        step_img = mol_to_image_b64(step['mol'], size=(300, 190))
+                        st.markdown(f'<img src="data:image/png;base64,{step_img}" width="100%">', unsafe_allow_html=True)
+                    with c_info:
+                        label_color = "#1B5E20" if step['success'] else "#E65100"
+                        badge = "✅ BBB+" if step['success'] else f"Cycle {step['cycle']}"
+                        dp = step['delta_prob'] * 100
+                        st.markdown(
+                            f"""<span style='font-size:17px; font-weight:700; color:{label_color}'>"""
+                            f"""{badge} — BBB Prob: {step['prob']*100:.1f}% ({'+' if dp>=0 else ''}{dp:.1f}% this cycle)</span>""",
+                            unsafe_allow_html=True
+                        )
+                        cm1, cm2, cm3, cm4 = st.columns(4)
+                        cm1.metric("BPI",      f"{step['bpi']:.3f}")
+                        cm2.metric("Momentum", f"{step['momentum']:.2f}")
+                        cm3.metric("LogP",     f"{step['logp']:.2f}")
+                        cm4.metric("MW",       f"{step['mw']:.0f} Da")
+                        st.markdown(f"**Why:** {', '.join(step['reasons'])}.")
+                        st.code(step['smiles'], language=None)
+
+            # --- PROGRESSION CHART ---
+            st.markdown("---")
+            st.subheader("📈 Probability Progression")
+            x_labels = ["Source"] + [f"Cycle {s['cycle']}" for s in path]
+            y_values = [f['prob']*100] + [s['prob']*100 for s in path]
+            colors = ['#B71C1C'] + ['#1B5E20' if s['success'] else '#E65100' for s in path]
+
+            fig3, ax3 = plt.subplots(figsize=(max(6, len(x_labels)*1.5), 3.5))
+            ax3.plot(x_labels, y_values, 'o-', color='#003366', linewidth=2.5, markersize=9, zorder=3)
+            ax3.fill_between(x_labels, y_values, alpha=0.12, color='#003366')
+            for xi, (xl, yv, col) in enumerate(zip(x_labels, y_values, colors)):
+                ax3.scatter([xl], [yv], color=col, s=120, zorder=4)
+                ax3.text(xi, yv + 2, f"{yv:.1f}%", ha='center', fontsize=9, fontweight='bold')
+            ax3.axhline(50, color='#FF6B35', linestyle='--', lw=1.5, label='BBB+ Threshold (50%)')
+            ax3.set_ylabel("BBB Probability (%)")
+            ax3.set_ylim(0, 105)
+            ax3.set_title("Closed-Loop Optimization: Probability per Cycle", fontsize=12, fontweight='bold')
+            ax3.legend()
+            ax3.spines['top'].set_visible(False)
+            ax3.spines['right'].set_visible(False)
+            st.pyplot(fig3)
 
     else:
-        st.info("Click **🚀 RUN OPTIMIZER** above to generate chemically modified variants ranked by BBB permeability.")
+        st.info("Click **🚀 RUN CLOSED-LOOP OPTIMIZER** to iteratively optimize this molecule until it reaches BBB+ permeability.")
+
